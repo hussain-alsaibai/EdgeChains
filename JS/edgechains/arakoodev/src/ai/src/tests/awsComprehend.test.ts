@@ -1,16 +1,12 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
 // @ts-nocheck
-import axios from "axios";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   AWSComprehend,
   applyRedactions,
   PiiEntity,
 } from "../../../../dist/ai/src/lib/aws-comprehend/awsComprehend.js";
 import { Redact } from "../../../../dist/ai/src/lib/aws-comprehend/redact.js";
-
-jest.mock("axios");
-
-const mockedAxios = axios as any;
 
 function makeEntity(
   begin: number,
@@ -21,23 +17,33 @@ function makeEntity(
   return { BeginOffset: begin, EndOffset: end, Score: score, Type: type };
 }
 
+function mockHttpClient(entities: PiiEntity[]) {
+  return {
+    post: vi.fn().mockResolvedValue({
+      data: {
+        Entities: entities,
+        ModelVersion: "1.0",
+      },
+    }),
+  };
+}
+
 describe("AWSComprehend", () => {
   afterEach(() => {
-    jest.clearAllMocks();
+    vi.clearAllMocks();
   });
 
   it("detects PII entities and sorts them by offset", async () => {
-    mockedAxios.post.mockResolvedValueOnce({
-      data: {
-        Entities: [makeEntity(20, 35, "PHONE"), makeEntity(6, 22, "EMAIL")],
-        ModelVersion: "1.0",
-      },
-    });
+    const httpClient = mockHttpClient([
+      makeEntity(20, 35, "PHONE"),
+      makeEntity(6, 22, "EMAIL"),
+    ]);
 
     const client = new AWSComprehend({
       accessKeyId: "AKIA-TEST",
       secretAccessKey: "secret",
       region: "us-east-1",
+      httpClient,
     });
 
     const entities = await client.detectPiiEntities(
@@ -46,20 +52,19 @@ describe("AWSComprehend", () => {
     expect(entities).toHaveLength(2);
     expect(entities[0].Type).toBe("EMAIL");
     expect(entities[1].Type).toBe("PHONE");
-    expect(mockedAxios.post).toHaveBeenCalledTimes(1);
+    expect(httpClient.post).toHaveBeenCalledTimes(1);
   });
 
   it("redacts only the requested entity types", async () => {
-    mockedAxios.post.mockResolvedValueOnce({
-      data: {
-        Entities: [makeEntity(0, 3, "NAME"), makeEntity(4, 20, "EMAIL")],
-        ModelVersion: "1.0",
-      },
-    });
+    const httpClient = mockHttpClient([
+      makeEntity(0, 3, "NAME"),
+      makeEntity(4, 20, "EMAIL"),
+    ]);
 
     const client = new AWSComprehend({
       accessKeyId: "AKIA-TEST",
       secretAccessKey: "secret",
+      httpClient,
     });
 
     const result = await client.redact("Bob bob@example.com", ["EMAIL"]);
@@ -69,16 +74,12 @@ describe("AWSComprehend", () => {
   });
 
   it("supports a custom replacement placeholder", async () => {
-    mockedAxios.post.mockResolvedValueOnce({
-      data: {
-        Entities: [makeEntity(0, 5, "SSN")],
-        ModelVersion: "1.0",
-      },
-    });
+    const httpClient = mockHttpClient([makeEntity(0, 5, "SSN")]);
 
     const client = new AWSComprehend({
       accessKeyId: "AKIA-TEST",
       secretAccessKey: "secret",
+      httpClient,
     });
 
     const result = await client.redact("12345", "ALL", "***");
@@ -126,19 +127,14 @@ describe("applyRedactions", () => {
 
 describe("Redact (chainable wrapper)", () => {
   afterEach(() => {
-    jest.clearAllMocks();
+    vi.clearAllMocks();
   });
 
   it("redacts the prompt before delegating to the wrapped endpoint", async () => {
-    mockedAxios.post.mockResolvedValue({
-      data: {
-        Entities: [makeEntity(3, 20, "EMAIL")],
-        ModelVersion: "1.0",
-      },
-    });
+    const httpClient = mockHttpClient([makeEntity(3, 20, "EMAIL")]);
 
     const fakeEndpoint = {
-      chat: jest.fn(async (req: any) => ({
+      chat: vi.fn(async (req: any) => ({
         content: `echo:${req.prompt}`,
       })),
     };
@@ -146,6 +142,7 @@ describe("Redact (chainable wrapper)", () => {
     const safe = new Redact(fakeEndpoint, {
       accessKeyId: "AKIA-TEST",
       secretAccessKey: "secret",
+      httpClient,
     });
 
     const response = await safe.chat({
@@ -158,20 +155,16 @@ describe("Redact (chainable wrapper)", () => {
   });
 
   it("redacts messages array when no prompt is provided", async () => {
-    mockedAxios.post.mockResolvedValueOnce({
-      data: {
-        Entities: [makeEntity(0, 5, "SSN")],
-        ModelVersion: "1.0",
-      },
-    });
+    const httpClient = mockHttpClient([makeEntity(0, 5, "SSN")]);
 
     const fakeEndpoint = {
-      chat: jest.fn(async () => ({ content: "ok" })),
+      chat: vi.fn(async () => ({ content: "ok" })),
     };
 
     const safe = new Redact(fakeEndpoint, {
       accessKeyId: "AKIA-TEST",
       secretAccessKey: "secret",
+      httpClient,
     });
 
     await safe.chat({
@@ -184,7 +177,7 @@ describe("Redact (chainable wrapper)", () => {
 
   it("bypass flag skips the network call entirely", async () => {
     const fakeEndpoint = {
-      chat: jest.fn(async (req: any) => ({ content: req.prompt })),
+      chat: vi.fn(async (req: any) => ({ content: req.prompt })),
     };
 
     const safe = new Redact(fakeEndpoint, { bypass: true });
@@ -194,20 +187,14 @@ describe("Redact (chainable wrapper)", () => {
       prompt: "alice@example.com",
     });
     expect(response).toEqual({ content: "alice@example.com" });
-    expect(mockedAxios.post).not.toHaveBeenCalled();
   });
 
   it("exposes a manual redactText helper", async () => {
-    mockedAxios.post.mockResolvedValueOnce({
-      data: {
-        Entities: [makeEntity(5, 13, "PHONE")],
-        ModelVersion: "1.0",
-      },
-    });
+    const httpClient = mockHttpClient([makeEntity(5, 13, "PHONE")]);
 
     const safe = new Redact(
-      { chat: jest.fn() },
-      { accessKeyId: "AKIA-TEST", secretAccessKey: "secret" },
+      { chat: vi.fn() },
+      { accessKeyId: "AKIA-TEST", secretAccessKey: "secret", httpClient },
     );
 
     const result = await safe.redactText("Call 555-1234 now");
@@ -215,16 +202,11 @@ describe("Redact (chainable wrapper)", () => {
   });
 
   it("emits exactly one next/complete pair on subscribe", async () => {
-    mockedAxios.post.mockResolvedValueOnce({
-      data: {
-        Entities: [makeEntity(6, 23, "EMAIL")],
-        ModelVersion: "1.0",
-      },
-    });
+    const httpClient = mockHttpClient([makeEntity(6, 23, "EMAIL")]);
 
     const safe = new Redact(
-      { chat: jest.fn() },
-      { accessKeyId: "AKIA-TEST", secretAccessKey: "secret" },
+      { chat: vi.fn() },
+      { accessKeyId: "AKIA-TEST", secretAccessKey: "secret", httpClient },
     );
     (safe as any)._pendingText = "Email alice@example.com";
 

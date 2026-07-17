@@ -1,5 +1,6 @@
 import {
   AWSComprehend,
+  DetectPiiEntitiesOptions,
   PiiEntityType,
   RedactionResult,
 } from "./awsComprehend.js";
@@ -30,6 +31,10 @@ export interface RedactOptions {
   replacement?: string;
   /** Skip the network call and return the input untouched. */
   bypass?: boolean;
+  /** Optional HTTP client override, mainly for tests or shared clients. */
+  httpClient?: DetectPiiEntitiesOptions["httpClient"];
+  /** Optional Comprehend request timeout in milliseconds. */
+  timeoutMs?: number;
 }
 
 export interface Subscriber<T> {
@@ -116,6 +121,8 @@ export class Redact implements ObservableLike<RedactionResult> {
       secretAccessKey: options.secretAccessKey,
       sessionToken: options.sessionToken,
       endpoint: options.endpoint,
+      timeoutMs: options.timeoutMs,
+      httpClient: options.httpClient,
     });
   }
 
