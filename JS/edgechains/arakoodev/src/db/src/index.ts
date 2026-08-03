@@ -1,5 +1,11 @@
-export { PostgresClient } from "./lib/postgres-client/PostgresClient.js";
+export { PostgresClient, PostgresDistanceMetric } from "./lib/postgres-client/PostgresClient.js";
 export { QdrantClient } from "./lib/qdrant-client/QdrantClient.js";
+export {
+  QdrantVectorDB,
+  QdrantDistanceMetric,
+  type HydeSearchResult,
+  type ArkRequestLike,
+} from "./lib/qdrant-client/QdrantVectorDB.js";
 export type {
   QdrantPoint,
   QdrantSearchParams,
@@ -10,4 +16,3 @@ export type {
   QdrantUpsertResult,
   QdrantDeleteResult,
 } from "./lib/qdrant-client/QdrantClient.js";
-export { QdrantDistanceMetric } from "./lib/qdrant-client/QdrantClient.js";
