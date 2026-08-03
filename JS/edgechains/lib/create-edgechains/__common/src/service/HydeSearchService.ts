@@ -1,16 +1,44 @@
 import Jsonnet from "@arakoodev/jsonnet";
 import { OpenAiEndpoint } from "@arakoodev/edgechains.js";
-import { PostgresClient } from "@arakoodev/edgechains.js";
-import type { ArkRequest } from "@arakoodev/edgechains.js";
+import {
+    PostgresClient,
+    PostgresDistanceMetric as PgMetric,
+    QdrantVectorDB,
+    QdrantDistanceMetric as QdrantMetric,
+    type ArkRequestLike,
+} from "@arakoodev/edgechains.js";
 import * as path from "path";
 
-enum PostgresDistanceMetric {
-    COSINE = "COSINE",
-    IP = "IP",
-    L2 = "L2",
+export enum VectorDBProvider {
+    POSTGRES = "postgres",
+    QDRANT = "qdrant",
 }
 
-async function hydeSearchAdaEmbedding(arkRequest: ArkRequest, apiKey: string, orgId: string) {
+export interface ArkRequest extends ArkRequestLike {
+    topK?: number;
+    metadataTable?: string;
+    vectorDB?: VectorDBProvider;
+    qdrantCollection?: string;
+}
+
+/**
+ * Map a PostgresDistanceMetric to the string form used by both clients.
+ */
+function pgMetricFromString(metric: string): "COSINE" | "IP" | "L2" {
+    switch (metric) {
+        case "COSINE": return "COSINE";
+        case "IP":     return "IP";
+        case "L2":     return "L2";
+        default:        return "COSINE";
+    }
+}
+
+async function hydeSearchAdaEmbedding(
+    arkRequest: ArkRequest,
+    apiKey: string,
+    orgId: string,
+    qdrantUrl?: string
+) {
     try {
         const gpt3endpoint = new OpenAiEndpoint(
             "https://api.openai.com/v1/chat/completions",
@@ -20,66 +48,76 @@ async function hydeSearchAdaEmbedding(arkRequest: ArkRequest, apiKey: string, or
             "user",
             parseInt("0.7")
         );
-        // Get required params from API...
-        const table = "ada_hyde_prod";
-        const namespace = "360_docs";
-        const query = arkRequest.query;
-        const topK = Number(arkRequest.topK);
 
-        //
+        const table         = "ada_hyde_prod";
+        const namespace     = "360_docs";
+        const query         = arkRequest.query ?? "";
+        const topK          = Number(arkRequest.topK ?? 5);
+        const limit         = topK;
+        const vectorDB      = arkRequest.vectorDB ?? VectorDBProvider.POSTGRES;
+
         const jsonnet = new Jsonnet();
-
         const promptPath = path.join(__dirname, "../src/jsonnet/prompts.jsonnet");
-        const hydePath = path.join(__dirname, "../src/jsonnet/hyde.jsonnet");
-        // Load Jsonnet to extract args..
-        const promptLoader = jsonnet.evaluateFile(promptPath);
+        const hydePath   = path.join(__dirname, "../src/jsonnet/hyde.jsonnet");
 
-        // Getting ${summary} basePrompt
-        const promptTemplate = JSON.parse(promptLoader).summary;
-        // Getting the updated promptTemplate with query
+        const promptLoader    = JSON.parse(jsonnet.evaluateFile(promptPath));
+        const promptTemplate  = promptLoader.summary;
+
         let hydeLoader = jsonnet
             .extString("promptTemplate", promptTemplate)
             .extString("time", "")
             .extString("query", query)
             .evaluateFile(hydePath);
-
-        // Get concatenated prompt
         const prompt = JSON.parse(hydeLoader).prompt;
 
-        // Block and get the response from GPT3
+        // ── Chain 1 & 2: GPT-3 response → split → embeddings ──────────────────
         const gptResponse = await gpt3endpoint.gptFn(prompt);
-
-        // Chain 1 ==> Get Gpt3Response & split
         const gpt3Responses = gptResponse.split("\n");
 
-        // Chain 2 ==> Get Embeddings from OpenAI using Each Response
         const embeddingsListChain: Promise<number[][]> = Promise.all(
-            gpt3Responses.map(async (resp) => {
-                const embedding = await gpt3endpoint.embeddings(resp);
-                return embedding;
-            })
+            gpt3Responses.map((resp) => gpt3endpoint.embeddings(resp))
         );
 
-        // Chain 5 ==> Query via EmbeddingChain
-        const dbClient = new PostgresClient(
-            await embeddingsListChain,
-            PostgresDistanceMetric.IP,
-            topK,
-            20,
-            table,
-            namespace,
-            arkRequest,
-            15
-        );
+        // ── Chain 5: Vector DB query ────────────────────────────────────────────
+        const embeddings = await embeddingsListChain;
 
-        const queryResult = await dbClient.dbQuery();
+        let queryResult: Array<Record<string, unknown>>;
 
-        // Chain 6 ==> Create Prompt using Embeddings
+        if (vectorDB === VectorDBProvider.QDRANT) {
+            const qdrantCollection = arkRequest.qdrantCollection ?? table;
+            const qdrantClient = new QdrantVectorDB(
+                embeddings,
+                pgMetricFromString(PgMetric.IP),   // default to IP (inner product)
+                topK,
+                qdrantCollection,
+                namespace,
+                arkRequest,
+                limit
+            );
+            if (qdrantUrl) qdrantClient.setUrl(qdrantUrl);
+            queryResult = await qdrantClient.dbQuery();
+        } else {
+            const dbClient = new PostgresClient(
+                embeddings,
+                PgMetric.IP,
+                topK,
+                20,
+                table,
+                namespace,
+                arkRequest,
+                limit
+            );
+            queryResult = await dbClient.dbQuery();
+        }
+
+        // ── Chain 6: Build retrieval context ────────────────────────────────────
         const retrievedDocs: string[] = [];
 
-        for (const embeddings of queryResult) {
+        for (const embeddings2 of queryResult) {
             retrievedDocs.push(
-                `${embeddings.raw_text}\n score:${embeddings.score}\n filename:${embeddings.filename}\n`
+                `${embeddings2.raw_text ?? embeddings2.metadata ?? ""}\n` +
+                `score:${embeddings2.score ?? "N/A"}\n` +
+                `filename:${embeddings2.filename ?? "N/A"}\n`
             );
         }
 
@@ -87,22 +125,16 @@ async function hydeSearchAdaEmbedding(arkRequest: ArkRequest, apiKey: string, or
             retrievedDocs.length = 4096;
         }
 
-        const currentTime = new Date().toLocaleString();
-        const formattedTime = currentTime;
-
-        // System prompt
-        const ansPromptSystem = JSON.parse(promptLoader).ans_prompt_system;
+        const currentTime    = new Date().toLocaleString();
+        const ansPromptSystem = promptLoader.ans_prompt_system;
+        const ansPromptUser   = promptLoader.ans_prompt_user;
 
         hydeLoader = await jsonnet
             .extString(promptTemplate, ansPromptSystem)
-            .extString("time", formattedTime)
+            .extString("time", currentTime)
             .extString("qeury", retrievedDocs.join(""))
             .evaluateFile(hydePath);
-
         const finalPromptSystem = JSON.parse(hydeLoader).prompt;
-
-        // User prompt
-        const ansPromptUser = JSON.parse(promptLoader).ans_prompt_user;
 
         hydeLoader = await jsonnet
             .extString(promptTemplate, ansPromptUser)
@@ -112,18 +144,16 @@ async function hydeSearchAdaEmbedding(arkRequest: ArkRequest, apiKey: string, or
 
         const chatMessages = [
             { role: "system", content: finalPromptSystem },
-            { role: "user", content: finalPromptUser },
+            { role: "user",   content: finalPromptUser },
         ];
 
         const finalAnswer = await gpt3endpoint.gptFnChat(chatMessages);
 
-        const response = {
+        return {
             wordEmbeddings: queryResult,
-            finalAnswer: finalAnswer,
+            finalAnswer,
         };
-        return response;
     } catch (error) {
-        // Handle errors here
         console.error(error);
         throw error;
     }

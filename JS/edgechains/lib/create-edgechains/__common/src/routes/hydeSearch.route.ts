@@ -1,5 +1,8 @@
 import { Hono } from "hono";
-import { hydeSearchAdaEmbedding } from "../service/HydeSearchService.js";
+import {
+    hydeSearchAdaEmbedding,
+    VectorDBProvider,
+} from "../service/HydeSearchService.js";
 import { HydeFragmentData } from "../types/HydeFragmentData.js";
 const HydeSearchRouter = new Hono();
 
@@ -9,6 +12,11 @@ HydeSearchRouter.get("/search", async (c) => {
         topK: parseInt(query.topK ?? "5"),
         metadataTable: query.metadataTable,
         query: query.query,
+        vectorDB:
+            query.vectorDB?.toLowerCase() === "qdrant"
+                ? VectorDBProvider.QDRANT
+                : VectorDBProvider.POSTGRES,
+        qdrantCollection: query.qdrantCollection,
         textWeight: {
             baseWeight: query.textBaseWeight,
             fineTuneWeight: query.textFineTuneWeight,
@@ -26,7 +34,8 @@ HydeSearchRouter.get("/search", async (c) => {
     const answer = await hydeSearchAdaEmbedding(
         arkRequest,
         process.env.OPENAI_API_KEY!,
-        process.env.OPENAI_ORG_ID!
+        process.env.OPENAI_ORG_ID!,
+        process.env.QDRANT_URL
     );
     const final_answer = answer.finalAnswer;
     const responses = answer.wordEmbeddings;
