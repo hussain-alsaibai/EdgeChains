@@ -1,12 +1,15 @@
 /**
- * Palm2 Chat Example
- * Run: arakoo run palm2-chat
- * Requires PALM2_API_KEY in secrets.jsonnet or environment variable.
+ * Palm2 Chat Example — Jsonnet template
+ * 
+ * Prompts are defined here (not hardcoded in TypeScript).
+ * Runtime variables are injected from secrets.jsonnet and HTTP request params.
+ * 
+ * Run: POST /chat with JSON body { topic: string, model?: string }
  */
 
 local secrets = import "../secrets.jsonnet";
-local apiKey = secrets.palm2_api_key;
 
+local apiKey = std.extVar("palm2_api_key");
 local topic = std.extVar("topic");
 local model = std.extVar("model") || "chat-bison-001";
 
@@ -24,6 +27,9 @@ local main() =
     prompt: promptWithTopic,
     temperature: 0.7,
     maxOutputTokens: 512,
+    topP: 0.95,
+    topK: 40,
+    candidateCount: 1,
   });
   palm2;
 
